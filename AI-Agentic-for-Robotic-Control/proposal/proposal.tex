@@ -1,0 +1,399 @@
+\documentclass[11pt]{article}
+\input{preamble}
+
+% Additional packages for this proposal
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{wrapfig}
+\usepackage{listings}
+\usepackage{tcolorbox}
+
+% Code listing style
+\lstdefinestyle{policy}{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{MidnightBlue}\bfseries,
+  commentstyle=\color{OliveGreen},
+  stringstyle=\color{BrickRed},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=5pt,
+  xleftmargin=1.5em,
+  frame=l,
+  framerule=1pt,
+  rulecolor=\color{MidnightBlue!40},
+  aboveskip=0.5em,
+  belowskip=0.5em,
+  showstringspaces=false,
+  morekeywords={global,np},
+}
+
+\title{\textbf{AI Agentic Robotic Control:} \\[0.3em]
+\large Self-Debugging Code Generation for Scripted Policy Synthesis}
+
+\author{
+  % Add author names here
+}
+
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We propose \textsc{RoboScribe}, an AI agent that converts natural language task descriptions into working robosuite scripted policies through a closed-loop self-debugging pipeline. The agent generates Python control code via an LLM, executes it in MuJoCo physics simulation, diagnoses failures from structured trajectory feedback, and iteratively revises its own code---autonomously cycling through \textbf{generate $\to$ simulate $\to$ diagnose $\to$ revise} until a target success rate is achieved. This agentic architecture treats the physics simulator as a \emph{unit test environment} for LLM-generated code, enabling automated verification and repair that single-pass code generation cannot achieve. To our knowledge, this is the first system to combine agentic self-debugging with physics simulation for robotic policy synthesis.
+\end{abstract}
+
+%% ============================================================
+\section{Problem Statement}
+\label{sec:problem}
+%% ============================================================
+
+\subsection{Why This Problem Matters}
+
+Scripted policies---deterministic controllers that execute manipulation tasks via state-machine logic---are essential infrastructure in robotics research: they generate training data for imitation learning \citep{mandlekar2022robomimic}, provide baselines for evaluation, and validate new environments. Yet writing them requires hours of manual trial-and-error per task, tuning waypoints, grasp timings, and force thresholds against simulator-specific APIs.
+
+LLMs can generate executable robot code from natural language \citep{liang2023code, singh2023progprompt}, but these systems operate in a \textbf{single pass}---when the code fails, there is no automated recovery. Meanwhile, simulation-in-the-loop systems like Eureka \citep{ma2024eureka} iterate with simulation feedback, but generate \emph{reward functions} (requiring GPU-hours of RL training), not immediately executable policies.
+
+The core gap: \textbf{no existing system applies agentic self-debugging to generate executable robotic control code}. Robosuite \citep{zhu2020robosuite}---a top-5 manipulation benchmark with 1,400+ GitHub stars---has zero LLM-based tooling despite widespread adoption.
+
+\subsection{Our Contribution}
+
+We introduce an \textbf{AI agent} that autonomously writes, tests, and debugs robotic control code:
+\begin{enumerate}[nosep]
+    \item \textbf{Agentic self-debugging loop.} The agent reasons about \emph{why} its generated code failed in physics simulation and revises accordingly---going beyond single-pass generation to closed-loop code repair.
+    \item \textbf{Structured physical feedback.} Unlike text-based self-debugging \citep{olausson2024selfrepair, besimulator2024}, the agent receives ground-truth feedback from MuJoCo: trajectory states, rewards, and force-torque readings, enabling diagnosis of \emph{physical} failures (missed grasps, collisions) not just syntactic ones.
+    \item \textbf{Human-supervised autonomy.} The agent runs its debugging cycles autonomously, while the human retains supervisory control---reviewing generated code, providing targeted feedback, or editing directly through an interactive review interface.
+\end{enumerate}
+
+%% ============================================================
+\section{Proposed Method}
+\label{sec:method}
+%% ============================================================
+
+\subsection{The Agentic Pipeline}
+
+Given a natural language task description (e.g., ``pick up the red cube and stack it on the green one'') and a robosuite environment, the agent produces a working Python policy through the iterative loop shown in \Cref{fig:pipeline}.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.2cm,
+    every node/.style={font=\small},
+    block/.style={rectangle, draw=MidnightBlue, fill=MidnightBlue!8, thick, rounded corners=3pt, minimum width=2.4cm, minimum height=0.9cm, align=center},
+    decision/.style={diamond, draw=BrickRed, fill=BrickRed!8, thick, minimum width=2.0cm, minimum height=0.9cm, align=center, aspect=2.2},
+    io/.style={rectangle, draw=OliveGreen, fill=OliveGreen!8, thick, rounded corners=8pt, minimum width=2.2cm, minimum height=0.8cm, align=center},
+    human/.style={rectangle, draw=Goldenrod!80!black, fill=Goldenrod!15, thick, rounded corners=3pt, minimum width=2.0cm, minimum height=0.8cm, align=center},
+    arrow/.style={-{Stealth[length=3mm]}, thick, draw=gray!70},
+    feedbackarrow/.style={-{Stealth[length=3mm]}, thick, draw=BrickRed!70, dashed},
+    humanarrow/.style={-{Stealth[length=3mm]}, thick, draw=Goldenrod!80!black, dashed},
+]
+
+% Nodes
+\node[io] (input) {Natural Language\\Task};
+\node[block, right=of input] (prompt) {Prompt\\Builder};
+\node[block, right=of prompt] (llm) {LLM\\Code Gen};
+\node[block, below=of llm] (sim) {Sandboxed\\Simulation\\{\scriptsize(robosuite)}};
+\node[decision, below=of sim] (check) {Success\\$\geq 80\%$?};
+\node[io, right=2.0cm of check] (output) {Policy\\{\scriptsize(\texttt{.py})}};
+\node[block, left=of check] (diag) {Agentic\\Diagnosis};
+\node[human, above=1.8cm of output] (human) {Human\\Supervisor};
+
+% Main flow
+\draw[arrow] (input) -- (prompt);
+\draw[arrow] (prompt) -- (llm);
+\draw[arrow] (llm) -- node[right, font=\scriptsize] {Python code} (sim);
+\draw[arrow] (sim) -- node[right, font=\scriptsize] {rollout data} (check);
+\draw[arrow] (check) -- node[above, font=\scriptsize] {\color{OliveGreen}\textbf{Yes}} (output);
+\draw[arrow] (check) -- node[above, font=\scriptsize] {\color{BrickRed}\textbf{No}} (diag);
+
+% Feedback loop (the agentic core)
+\draw[feedbackarrow] (diag) |- node[left, font=\scriptsize, near start] {diagnosis + code} (prompt);
+
+% Human supervision
+\draw[humanarrow] (human) -- node[right, font=\scriptsize] {approve} (output);
+\draw[humanarrow] (human) -| node[above, font=\scriptsize, near start] {feedback / edit} (llm);
+
+% Loop label
+\node[font=\scriptsize\itshape, BrickRed] at (-1.6, -2.8) {self-debugging loop};
+
+\end{tikzpicture}
+\caption{The agentic self-debugging pipeline. The red dashed feedback loop is the core agentic mechanism: the agent diagnoses its own simulation failures and revises its code accordingly. The human supervisor (gold, dashed) can inspect generated code, provide natural language feedback, or directly edit before the next iteration.}
+\label{fig:pipeline}
+\end{figure}
+
+The four stages work as follows:
+
+\paragraph{Stage 1: Prompt Construction.}
+The agent assembles a structured prompt containing: the robosuite API reference (action format, observation keys), environment description (objects, goals), few-shot examples demonstrating the state-machine pattern, and---on revision iterations---the previous code paired with its failure diagnosis and any human feedback.
+
+\paragraph{Stage 2: LLM Code Generation.}
+The LLM generates a complete Python policy file. Every generated policy follows the same interface: a \texttt{get\_action(obs)} function that reads sensor data and returns a 7D action vector (3D position delta + 3D orientation delta + gripper command), plus a \texttt{reset()} function. Internally, the agent encourages a state-machine structure:
+
+\begin{lstlisting}[style=policy, caption={Example generated policy structure (Lift task).}]
+APPROACH, LOWER, GRASP, LIFT = 0, 1, 2, 3
+state = APPROACH
+
+def get_action(obs):
+    global state
+    eef = obs["robot0_eef_pos"]     # end-effector position
+    cube = obs["cube_pos"]           # target object
+    action = np.zeros(7)
+
+    if state == APPROACH:            # move above the cube
+        action[:3] = 10.0 * (cube - eef)
+        action[2] = 0                # hold height
+        if np.linalg.norm(cube[:2] - eef[:2]) < 0.02:
+            state = LOWER
+    elif state == LOWER:             # descend to grasp height
+        action[2] = -0.5
+        if eef[2] < cube[2] + 0.01:
+            state = GRASP
+    elif state == GRASP:             # close gripper
+        action[6] = 1.0
+        state = LIFT
+    elif state == LIFT:              # lift up
+        action[2] = 0.5
+        action[6] = 1.0
+    return np.clip(action, -1, 1)
+\end{lstlisting}
+
+\paragraph{Stage 3: Sandboxed Simulation.}
+The generated code runs in a subprocess against robosuite for multiple randomized episodes (default: 10). Subprocess isolation means a crash in the generated code does not kill the agent. The simulation collects success/failure outcomes, per-step rewards, and a trajectory summary describing what the robot did.
+
+\paragraph{Stage 4: Agentic Diagnosis \& Revision.}
+If the success rate is below the target, the agent categorizes the failure and generates targeted repair suggestions. \Cref{fig:diagnosis} shows how different failure modes map to specific diagnoses. The agent then feeds the failed code, the diagnosis, and (optionally) human feedback back into the prompt builder for the next iteration.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    every node/.style={font=\small},
+    cat/.style={rectangle, draw=MidnightBlue, fill=MidnightBlue!8, thick, rounded corners=2pt, minimum width=3.2cm, minimum height=0.6cm, align=left},
+    fix/.style={rectangle, draw=OliveGreen!80!black, fill=OliveGreen!8, thick, rounded corners=2pt, minimum width=5.8cm, minimum height=0.6cm, align=left, font=\small},
+    arrow/.style={-{Stealth[length=2mm]}, thick, draw=gray!60},
+]
+
+\node[cat] (c1) at (0, 0) {\texttt{CODE\_ERROR}};
+\node[cat] (c2) at (0, -0.85) {\texttt{NO\_MOVEMENT}};
+\node[cat] (c3) at (0, -1.7) {\texttt{MISSED\_GRASP}};
+\node[cat] (c4) at (0, -2.55) {\texttt{INCONSISTENT}};
+\node[cat] (c5) at (0, -3.4) {\texttt{TIMEOUT}};
+
+\node[fix] (f1) at (6.8, 0) {Fix syntax/import; check obs keys};
+\node[fix] (f2) at (6.8, -0.85) {Check action scale; verify state init};
+\node[fix] (f3) at (6.8, -1.7) {Improve alignment; lower further; wait};
+\node[fix] (f4) at (6.8, -2.55) {Use obs values, not hardcoded positions};
+\node[fix] (f5) at (6.8, -3.4) {Check for infinite loops in state machine};
+
+\draw[arrow] (c1) -- (f1);
+\draw[arrow] (c2) -- (f2);
+\draw[arrow] (c3) -- (f3);
+\draw[arrow] (c4) -- (f4);
+\draw[arrow] (c5) -- (f5);
+
+\node[font=\small\bfseries, MidnightBlue] at (0, 0.6) {Failure Category};
+\node[font=\small\bfseries, OliveGreen!80!black] at (6.8, 0.6) {Repair Suggestion};
+
+\end{tikzpicture}
+\caption{The diagnosis module categorizes simulation failures and maps each to targeted repair suggestions that guide the LLM's next revision.}
+\label{fig:diagnosis}
+\end{figure}
+
+\subsection{Human-in-the-Loop Review}
+
+After each failed iteration, the agent enters an interactive review mode where the researcher can:
+\begin{itemize}[nosep]
+    \item \textbf{Inspect} the generated code with state-machine phases highlighted.
+    \item \textbf{Review} simulation results (success rate, rewards) and the agent's diagnosis.
+    \item \textbf{Provide feedback} (e.g., ``try lowering the arm further before closing the gripper'') that is injected as high-priority guidance into the next revision prompt.
+    \item \textbf{Edit} the code directly, then re-run simulation to test the fix.
+    \item \textbf{Continue} to let the agent self-debug autonomously, or \textbf{save/quit}.
+\end{itemize}
+This turns the tool from a black-box CLI into a collaborative human-AI debugging session, combining the agent's ability to iterate quickly with the researcher's domain expertise.
+
+\subsection{Why an Agentic Architecture}
+
+\textbf{Why not single-pass generation?}
+Contact-rich manipulation requires millimeter precision and frame-accurate timing. Single-pass systems \citep{liang2023code} cannot recover from the inevitable physical mismatches. \citet{olausson2024selfrepair} showed self-repair outperforms independent sampling when feedback is rich---and physics simulation provides the richest possible feedback.
+
+\textbf{Why not reward generation + RL?}
+Systems like Eureka \citep{ma2024eureka} close the loop but require GPU-hours of RL training per task. Scripted policies are immediately executable---the agent's output is a working \texttt{.py} file, not a training objective.
+
+\textbf{Why physical simulation, not mental simulation?}
+Besimulator \citep{besimulator2024} has the LLM ``mentally simulate'' code execution via text reasoning. This cannot capture contact dynamics, grasp stability, or force interactions. Our agent receives ground-truth physics feedback, enabling diagnosis of failures that are invisible to text-based reasoning.
+
+%% ============================================================
+\section{Literature Review}
+\label{sec:literature}
+%% ============================================================
+
+\subsection{Prior Work}
+
+We organize related work by how close each system comes to agentic self-debugging for robotic code generation.
+
+\subsubsection{LLM Code Generation for Robotics (No Self-Debugging)}
+
+\textbf{Code as Policies} \citep{liang2023code} generates executable Python for robot primitives but operates single-pass with no recovery.
+\textbf{ProgPrompt} \citep{singh2023progprompt} adds assertion-based precondition checks but no iterative refinement.
+\textbf{ChatGPT for Robotics} \citep{vemprala2023chatgpt} requires a human to manually verify and debug generated code.
+These establish that LLMs \emph{can} generate robot code---but lack the agentic loop to make it reliable.
+
+\subsubsection{Simulation-in-the-Loop Systems (Reward Functions, Not Policies)}
+
+\textbf{Eureka} \citep{ma2024eureka} uses evolutionary search over LLM-generated reward functions with simulation feedback (IsaacGym). \textbf{Text2Reward} \citep{xie2024text2reward} iteratively refines reward code for ManiSkill2/MetaWorld. \textbf{Language to Rewards} \citep{yu2023language} translates instructions to reward parameters for MuJoCo MPC. These demonstrate the simulation-in-the-loop paradigm but produce rewards requiring RL training, not executable policies.
+
+\subsubsection{Agentic Self-Debugging (General Code, Not Robotics)}
+
+\textbf{Self-Debugging} \citep{olausson2024selfrepair} teaches LLMs to debug their own code via execution feedback---``rubber duck debugging.'' \textbf{Reflexion} \citep{shinn2023reflexion} generalizes this with verbal reinforcement learning and episodic memory. \textbf{Voyager} \citep{voyager2023} applies iterative code generation with environment feedback in Minecraft. These prove agentic self-repair works---but none target physics-realistic robot simulation.
+
+\subsubsection{Multi-Agent and Embodied LLM Systems}
+
+\textbf{MALMM} \citep{malmm2025} uses three LLM agents (Planner, Coder, Supervisor) for zero-shot manipulation on RLBench. \textbf{FAEA} \citep{faea2025} applies frontier LLMs as embodied controllers achieving 84--96\% on LIBERO/ManiSkill. \textbf{Inner Monologue} \citep{huang2022inner} feeds scene descriptions back to LLM planners for closed-loop replanning. These are agentic but target different simulators and/or different abstraction levels (skill selection, not policy code).
+
+\subsection{The Gap}
+
+\Cref{tab:comparison} summarizes: no prior system combines agentic self-debugging with physics simulation to generate executable policy code for robosuite.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Comparison of related systems along the dimensions that define our contribution.}
+\label{tab:comparison}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{System} & \textbf{Output} & \textbf{Agentic loop} & \textbf{Physics sim} & \textbf{Robosuite} \\
+\midrule
+Code as Policies \citep{liang2023code}   & Policy code   & ---  & --- & --- \\
+ProgPrompt \citep{singh2023progprompt}    & Task plans      & ---  & --- & --- \\
+Eureka \citep{ma2024eureka}              & Reward code & \checkmark & \checkmark & --- \\
+Text2Reward \citep{xie2024text2reward}   & Reward code & \checkmark & \checkmark & --- \\
+Voyager \citep{voyager2023}              & Skill code  & \checkmark & --- & --- \\
+MALMM \citep{malmm2025}           & Policy code   & \checkmark  & \checkmark & --- \\
+Besimulator \citep{besimulator2024}       & Policy code   & \checkmark & text only & --- \\
+FAEA \citep{faea2025}                    & Actions  & \checkmark  & \checkmark & --- \\
+\midrule
+\textbf{Ours} & \textbf{Policy code} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Creative Point}
+
+The key insight is treating \textbf{physics simulation as a unit test suite for agentic code generation}. Most systems use simulation to train policies (RL) or evaluate rewards. We invert this: the simulator provides \emph{ground-truth execution feedback} that the agent uses for self-diagnosis and targeted code repair. This maps the software engineering pattern of test-driven development onto robotic policy synthesis---where the ``tests'' are physics rollouts and the ``developer'' is an LLM agent that reasons about its own physical failures.
+
+This is enabled by targeting scripted policies specifically: they are structurally predictable (state machines), inherently verifiable (measurable success rate), immediately executable (no training), and human-editable (readable code). This makes them the ideal substrate for agentic self-debugging in robotics.
+
+%% ============================================================
+\section{Evaluation Plan}
+\label{sec:evaluation}
+%% ============================================================
+
+We evaluate on five robosuite tasks with increasing difficulty:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llcl@{}}
+\toprule
+\textbf{Task} & \textbf{Description} & \textbf{Phases} & \textbf{Challenge} \\
+\midrule
+Lift        & Pick up a cube                & 4  & Basic manipulation \\
+Door        & Open a door by the handle     & 3  & Handle geometry \\
+Stack       & Stack one cube on another     & 7  & Precise placement \\
+PickPlace   & Pick a can, place in bin      & 5  & Long-horizon \\
+NutAssembly & Fit a nut onto a peg          & 6  & Tight alignment \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent For each task, we measure:
+\begin{itemize}[nosep]
+    \item \textbf{Success rate} over 50 randomized episodes (object positions vary).
+    \item \textbf{Iterations to convergence}: how many self-debugging rounds to reach $\geq$80\%.
+    \item \textbf{Ablation}: agentic loop vs.\ single-pass generation; structured diagnosis vs.\ raw error messages.
+\end{itemize}
+
+%% ============================================================
+\bibliographystyle{abbrvnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Chen et~al.(2024)]{olausson2024selfrepair}
+X.~Chen, et~al.
+\newblock Teaching Large Language Models to Self-Debug.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Huang et~al.(2022)]{huang2022inner}
+W.~Huang, F.~Xia, T.~Xiao, et~al.
+\newblock Inner Monologue: Embodied Reasoning through Planning with Language Models.
+\newblock In \emph{CoRL}, 2022.
+
+\bibitem[Kannan et~al.(2025)]{faea2025}
+S.~Kannan, et~al.
+\newblock FAEA: LLM Agents as Embodied Controllers for Zero-Shot Robotic Manipulation.
+\newblock \emph{arXiv:2601.20334}, 2025.
+
+\bibitem[Liang et~al.(2023)]{liang2023code}
+J.~Liang, W.~Huang, F.~Xia, P.~Xu, K.~Hausman, B.~Ichter, P.~Florence, and A.~Zeng.
+\newblock Code as Policies: Language Model Programs for Embodied Control.
+\newblock In \emph{ICRA}, 2023.
+
+\bibitem[Ma et~al.(2024)]{ma2024eureka}
+Y.~J.~Ma, W.~Liang, G.~Wang, et~al.
+\newblock Eureka: Human-Level Reward Design via Coding Large Language Models.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Mandlekar et~al.(2021)]{mandlekar2022robomimic}
+A.~Mandlekar, D.~Xu, J.~Wong, et~al.
+\newblock What Matters in Learning from Offline Human Demonstrations for Robot Manipulation.
+\newblock In \emph{CoRL}, 2021.
+
+\bibitem[Shinn et~al.(2023)]{shinn2023reflexion}
+N.~Shinn, F.~Cassano, A.~Gopinath, K.~Narasimhan, and S.~Yao.
+\newblock Reflexion: Language Agents with Verbal Reinforcement Learning.
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem[Singh et~al.(2023)]{singh2023progprompt}
+I.~Singh, V.~Blukis, A.~Mousavian, et~al.
+\newblock ProgPrompt: Generating Situated Robot Task Plans using Large Language Models.
+\newblock In \emph{ICRA}, 2023.
+
+\bibitem[Singh et~al.(2025)]{malmm2025}
+H.~Singh, S.~Kumar, and K.~Vaidyanathan.
+\newblock MALMM: Multi-Agent Large Language Models for Zero-Shot Robotic Manipulation.
+\newblock In \emph{IROS}, 2025.
+
+\bibitem[Vemprala et~al.(2023)]{vemprala2023chatgpt}
+S.~Vemprala, R.~Bonatti, A.~Bucker, and A.~Kapoor.
+\newblock ChatGPT for Robotics: Design Principles and Model Abilities.
+\newblock \emph{Microsoft Technical Report}, 2023.
+
+\bibitem[Wang et~al.(2023)]{voyager2023}
+G.~Wang, Y.~Xie, Y.~Jiang, et~al.
+\newblock Voyager: An Open-Ended Embodied Agent with Large Language Models.
+\newblock \emph{arXiv:2305.16291}, 2023.
+
+\bibitem[Xie et~al.(2024)]{xie2024text2reward}
+T.~Xie, S.~Zhao, C.~H.~Wu, et~al.
+\newblock Text2Reward: Reward Shaping with Language Models for Reinforcement Learning.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Yu et~al.(2023)]{yu2023language}
+W.~Yu, N.~Gileadi, C.~Fu, et~al.
+\newblock Language to Rewards for Robotic Skill Synthesis.
+\newblock \emph{arXiv:2306.08647}, 2023.
+
+\bibitem[Zhu et~al.(2020)]{zhu2020robosuite}
+Y.~Zhu, J.~Wong, A.~Mandlekar, R.~Mart\'{i}n-Mart\'{i}n, et~al.
+\newblock robosuite: A Modular Simulation Framework and Benchmark for Robot Learning.
+\newblock \emph{arXiv:2009.12293}, 2020.
+
+\bibitem[Zhu et~al.(2024)]{besimulator2024}
+Y.~Zhu, et~al.
+\newblock Besimulator: LLM-Driven Corrective Robot Operation Code Generation.
+\newblock \emph{arXiv:2512.02002}, 2024.
+
+\end{thebibliography}
+
+\end{document}

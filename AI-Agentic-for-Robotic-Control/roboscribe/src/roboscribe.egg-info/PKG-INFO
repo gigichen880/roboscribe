@@ -1,0 +1,244 @@
+Metadata-Version: 2.4
+Name: roboscribe
+Version: 0.1.0
+Summary: AI agent that generates robosuite scripted policies from natural language
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: openai>=1.0
+Requires-Dist: anthropic>=0.20
+Provides-Extra: sim
+Requires-Dist: robosuite>=1.4; extra == "sim"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.0; extra == "dev"
+
+# RoboScribe
+
+AI agent that generates robosuite scripted policies from natural language descriptions.
+
+## Overview
+
+RoboScribe takes a natural language description of a robot task, generates Python control code, runs it in robosuite simulation, self-debugs by analyzing failures, and iterates until the policy works — with optional human supervision.
+
+```
+"pick up the cube"  →  LLM generates code  →  simulate  →  diagnose  →  revise  →  working policy
+```
+
+## Installation
+
+```bash
+# From repo root (recommended):
+pip install -e "roboscribe/"              # basic (LLM backends only)
+pip install -e "roboscribe/[sim]"         # with robosuite for simulation
+pip install -e "roboscribe/[dev]"         # with development dependencies
+
+# For video recording
+pip install imageio imageio-ffmpeg
+```
+
+## Quick Start
+
+### Step 1: Install
+
+```bash
+# From repo root:
+pip install -e "roboscribe/[sim]"       # includes robosuite for simulation
+
+# Or from inside the package directory:
+cd roboscribe && pip install -e ".[sim]"
+```
+
+### Step 2: Set up an LLM backend
+
+Pick **one** provider and set its API key:
+
+```bash
+export DASHSCOPE_API_KEY=sk-...      # Qwen (free tier available)
+# OR
+export OPENAI_API_KEY=sk-...         # OpenAI
+# OR
+export ANTHROPIC_API_KEY=sk-ant-...  # Anthropic
+# OR
+export DEEPSEEK_API_KEY=sk-...       # DeepSeek
+```
+
+Check that your backend is ready:
+
+```bash
+roboscribe backends    # shows all backends and which keys are detected
+```
+
+### Step 3: Generate a policy
+
+```bash
+roboscribe generate "pick up the cube" --env Lift --backend qwen
+```
+
+### Step 4: Test and record
+
+```bash
+# Test a policy
+roboscribe test lift_policy.py --episodes 20
+
+# Record a video
+roboscribe record lift_policy.py --env Lift -o demo.mp4
+
+# List supported environments
+roboscribe envs
+```
+
+## Usage
+
+### Streamlit App
+```bash
+pip install streamlit
+streamlit run ui/app.py
+```
+### Generate a Policy
+
+```bash
+roboscribe generate "pick up the cube" \
+    --env Lift \
+    --robot Panda \
+    --backend qwen \
+    --model qwen-plus \
+    --max-attempts 5 \
+    --episodes 10 \
+    -v
+```
+
+Options:
+- `--env, -e`: Robosuite environment (Lift, Stack, PickPlaceCan, NutAssemblySquare, Door, Wipe)
+- `--robot, -r`: Robot model (default: Panda)
+- `--backend, -b`: LLM backend — `openai`, `anthropic`, `qwen`, or `deepseek`
+- `--model, -m`: Model name (auto-selected per backend)
+- `--base-url`: Custom API base URL for OpenAI-compatible providers
+- `--api-key`: API key (or use environment variables)
+- `--max-attempts`: Max self-debugging iterations (default: 5)
+- `--episodes`: Episodes per evaluation (default: 10)
+- `--interactive, -i`: Pause between iterations for human review
+- `--verbose, -v`: Detailed output
+
+### Test a Policy
+
+```bash
+roboscribe test lift_policy.py --episodes 20
+```
+
+### Record a Video
+
+```bash
+# Default camera (agentview)
+roboscribe record lift_policy.py --env Lift -o demo.mp4
+
+# Different camera angles
+roboscribe record lift_policy.py --env Lift --camera frontview -o front.mp4
+roboscribe record lift_policy.py --env Lift --camera sideview -o side.mp4
+
+# Multiple episodes
+roboscribe record lift_policy.py --env Lift -n 3 -o multi_episode.mp4
+```
+
+### List Environments
+
+```bash
+roboscribe envs
+```
+
+### Check Backend Status
+
+```bash
+roboscribe backends
+```
+
+Shows all supported LLM providers, whether their API key is detected, and quick-start examples for each.
+
+## Supported LLM Backends
+
+| Backend | Flag | Default Model | API Key Env Var |
+|---------|------|---------------|-----------------|
+| OpenAI | `--backend openai` | gpt-4o | `OPENAI_API_KEY` |
+| Anthropic | `--backend anthropic` | claude-sonnet-4-20250514 | `ANTHROPIC_API_KEY` |
+| Qwen | `--backend qwen` | qwen-plus | `DASHSCOPE_API_KEY` |
+| DeepSeek | `--backend deepseek` | deepseek-chat | `DEEPSEEK_API_KEY` |
+
+RoboScribe is provider-agnostic. Any OpenAI-compatible API can be used via `--base-url`.
+
+## How It Works
+
+1. **Generate**: LLM produces a `get_action(obs)` function using few-shot examples and environment context
+2. **Simulate**: Policy runs in robosuite via subprocess (isolates crashes/hangs)
+3. **Diagnose**: Failure categorization (code error, timeout, missed grasp, wrong target, no movement)
+4. **Revise**: LLM receives diagnosis + trajectory data and generates corrected code
+5. **Repeat**: Loop continues until success rate exceeds threshold (default 80%) or max attempts reached
+
+## Generated Policy Format
+
+Policies define a `get_action(obs) -> np.ndarray` function using the state-machine pattern:
+
+```python
+import numpy as np
+
+APPROACH, LOWER, GRASP, LIFT = 0, 1, 2, 3
+state = APPROACH
+
+def get_action(obs):
+    global state
+    eef_pos = obs["robot0_eef_pos"]
+    cube_pos = obs["cube_pos"]
+    action = np.zeros(7)  # OSC_POSE: [dx,dy,dz, dax,day,daz, gripper]
+    # ... state machine logic ...
+    return action
+
+def reset():
+    global state
+    state = APPROACH
+```
+
+## Supported Environments
+
+| Environment | Task | Objects |
+|---|---|---|
+| Lift | Pick up a cube | cube |
+| Stack | Stack red cube on green cube | cubeA, cubeB |
+| PickPlaceCan | Pick can, place in bin | can, bin |
+| NutAssemblySquare | Place nut on peg | square_nut, peg |
+| Door | Open door via handle | door, handle |
+| Wipe | Wipe markers off table | markers |
+
+## Architecture
+
+```
+roboscribe/
+├── cli.py              # Click CLI (generate, test, record, envs, backends)
+├── config.py           # Configuration + provider registry
+├── agent/
+│   ├── loop.py         # Generate → simulate → diagnose → revise loop
+│   ├── prompts.py      # LLM prompt templates
+│   ├── few_shot.py     # Hand-written example policies
+│   └── interactive.py  # Human-in-the-loop review UI
+├── llm/
+│   ├── base.py         # Abstract backend + code extraction
+│   ├── openai_backend.py   # OpenAI + compatible providers (Qwen, DeepSeek)
+│   ├── anthropic_backend.py
+│   └── factory.py
+├── sim/
+│   ├── runner.py       # Subprocess simulation execution
+│   ├── recorder.py     # Video recording (MP4)
+│   ├── env_registry.py # Environment descriptions
+│   ├── trajectory.py   # Result dataclass
+│   └── diagnostics.py  # Failure categorization
+└── output/
+    └── writer.py       # Standalone policy file writer
+```
+
+## Requirements
+
+- Python 3.10+
+- An LLM API key (OpenAI, Anthropic, Qwen, or DeepSeek)
+- robosuite >= 1.4 (for simulation — install with `pip install -e ".[sim]"`)
+- MuJoCo (required by robosuite)
+- imageio + imageio-ffmpeg (for video recording)

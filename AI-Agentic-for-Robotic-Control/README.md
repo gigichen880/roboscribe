@@ -1,0 +1,2 @@
+# AI-Agentic-for-Robotic-Control
+AI Agent for Robotic Control: Implement an AI agent that converts high-level natural language instructions into executable robot actions in robosuite. The system must: (1) parse at least 3 distinct task instructions (e.g., “stack the blocks,” “sort by size”), (2) generate a sequence of low-level actions or subgoals, and (3) successfully execute the task in simulation. Include a clear mapping from language → plan → control.
